@@ -16,6 +16,8 @@ from telegram.ext import (
 
 from chat import *
 from deepl_api import *
+from whisper_api import *
+from gtts_api import *
 
 class FunctionState(enum.IntEnum):
     SelectFunction  = 0,
@@ -98,11 +100,17 @@ async def translate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.message.voice:
         fpath = await get_voice(update, context)
-
-    message_text = update.message.text if fpath is None else fpath
+        message_text = transcribe_russian(fpath)
+    else:
+        message_text = update.message.text
 
     translated_text = deepl_translate(message_text, selectedLanguage)
     reply_markup = buildMainMenu()
+
+    if selectedLanguage != 'Polish':
+        ogg_path = text_to_speech_gtts(translated_text)
+        await update.message.reply_voice(voice=open(ogg_path, 'rb'))
+        os.remove(ogg_path)
 
     await update.message.reply_text(translated_text)
     await update.message.reply_text('Please choose:', reply_markup=reply_markup)

@@ -9,7 +9,7 @@ def deepl_set_auth(auth: str):
 def remap_language(language: str):
     lang_map = {
         'Polish': 'PL',
-        'English': 'EN'
+        'English': 'EN-US'
     }
 
     assert language in lang_map
@@ -18,5 +18,7 @@ def remap_language(language: str):
 def deepl_translate(text, language):
     language = remap_language(language)
     translator = deepl.Translator(auth_key)
+
+    print(f'translator = {language}')
     result = translator.translate_text(text, target_lang=language)
     return result.text
