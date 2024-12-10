@@ -18,20 +18,12 @@ from chat import *
 from deepl_api import *
 from whisper_api import *
 from gtts_api import text_to_speech_gtts
-
-class FunctionState(enum.IntEnum):
-    SelectFunction  = 0,
-    Translate       = 1,
-    SelectLanguage  = 3
-    Chat            = 2
+from tuser import TUser
 
 languages = [
     'Polish',
     'English'
 ]
-
-selectedState: FunctionState = FunctionState(FunctionState.SelectFunction)
-selectedLanguage: str
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -49,7 +41,7 @@ def buildMainMenu():
     reply_markup = InlineKeyboardMarkup(keyboard)
     return reply_markup    
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message with three inline buttons attached."""
     reply_markup = buildMainMenu()
 
@@ -64,15 +56,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
     await query.answer()
 
-    global selectedState
-    global selectedLanguage
+    user = TUser.get_user(update.effective_user)
 
     if query.data in languages:
-        selectedState = FunctionState.SelectLanguage    
+        user.state = TUser.FunctionState.SelectLanguage    
     else:
-        selectedState = FunctionState[query.data]
+        user.state = TUser.FunctionState[query.data]
 
-    if selectedState == FunctionState.Translate:
+    if user.state == TUser.FunctionState.Translate:
         keyboard = []
         for lang in languages:
             keyboard.append(
@@ -83,10 +74,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.edit_message_text("Please choose:", reply_markup=reply_markup)
 
-    elif selectedState == FunctionState.SelectLanguage:
-        selectedLanguage = query.data
+    elif user.state == TUser.FunctionState.SelectLanguage:
+        user.targetLanguage = query.data
         await query.edit_message_text(text=f"Selected option: {query.data}")
-    elif selectedState == FunctionState.Chat:
+    elif user.state == TUser.FunctionState.Chat:
         await query.edit_message_text(text=f"Selected option: {query.data}")
     else:
         await query.edit_message_text(text=f"Selected option: {query.data}")
@@ -94,7 +85,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays info on how to use the bot."""
-    await update.message.reply_text("Use /start to test this bot.")
+    await update.message.reply_text("Use /start_handler to test this bot.")
 
 async def translate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -104,10 +95,12 @@ async def translate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         message_text = update.message.text
 
-    translated_text = deepl_translate(message_text, selectedLanguage)
+    user = TUser.get_user(update.effective_user)
+
+    translated_text = deepl_translate(message_text, user.targetLanguage)
     reply_markup = buildMainMenu()
 
-    ogg_path = text_to_speech_gtts(translated_text, selectedLanguage)
+    ogg_path = text_to_speech_gtts(translated_text, user.targetLanguage)
     await update.message.reply_voice(voice=open(ogg_path, 'rb'))
     os.remove(ogg_path)
 
@@ -121,18 +114,21 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if selectedState == FunctionState.SelectLanguage:
-        await translate_handler(update, context)
-    elif selectedState == FunctionState.Chat:
-        await chat_handler(update, context)
+    user = TUser.get_user(update.effective_user)
 
-DOWNLOAD_DIR = "./downloads"
+    if user.state == TUser.FunctionState.SelectLanguage:
+        await translate_handler(update, context)
+    elif user.state == TUser.FunctionState.Chat:
+        await chat_handler(update, context)
 
 async def get_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    user = TUser.get_user(update.effective_user)
+    downloadDir = os.path.join('downloads', 'users', f'{user.id}')
+
      # Create downloads directory if not exists
-    if not os.path.exists(DOWNLOAD_DIR):
-        os.makedirs(DOWNLOAD_DIR)
+    if not os.path.exists(downloadDir):
+        os.makedirs(downloadDir)
 
     # Get the voice message
     voice = update.message.voice
@@ -141,9 +137,9 @@ async def get_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Download the voice message
     file = await voice.get_file()
-    ogg_path = os.path.join(DOWNLOAD_DIR, f"{file.file_id}.ogg")
+    ogg_path = os.path.join(downloadDir, f"{file.file_id}.ogg")
     await file.download_to_drive(ogg_path)
-    await update.message.reply_text(f"Voice message saved as {ogg_path}")
+    await update.message.reply_text(f"Processing...")
 
     return ogg_path
 
@@ -168,7 +164,7 @@ if __name__ == "__main__":
     # Create the Application and pass it your bot's token.
     application = Application.builder().token(tokens['telegram']).build()
 
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(button))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler((filters.VOICE | filters.TEXT) & ~filters.COMMAND, message_handler))
