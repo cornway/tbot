@@ -1,57 +1,177 @@
-
 import argparse
 import logging
 import random
 import json
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+import enum
+import os
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
 
 from chat import *
+from deepl_api import *
+from whisper_api import *
+from gtts_api import text_to_speech_gtts
+
+class FunctionState(enum.IntEnum):
+    SelectFunction  = 0,
+    Translate       = 1,
+    SelectLanguage  = 3
+    Chat            = 2
+
+languages = [
+    'Polish',
+    'English'
+]
+
+selectedState: FunctionState = FunctionState(FunctionState.SelectFunction)
+selectedLanguage: str
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-def schedule(context, chat_id):
-    due = random.randint(100, 500)
-    context.job_queue.run_once(send_message, due, chat_id=chat_id, name=str(chat_id), data=due)
+def buildMainMenu():
+    keyboard = [
+        [
+            InlineKeyboardButton("Translate", callback_data='Translate'),
+            InlineKeyboardButton("Chat", callback_data='Chat'),
+        ],
+    ]
 
-def get_message():
-    message = chat_get_message('There is a girl which name is Helen, generate a less than 10 words kind message to her')
-    logging.info(f'Chat message : {message}')
-    return message
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    return reply_markup    
 
-async def send_message(context: ContextTypes.DEFAULT_TYPE) -> None:
-    job = context.job
-    schedule(context, job.chat_id)
-    message = get_message()
-    await context.bot.send_message(job.chat_id, text=message)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a message with three inline buttons attached."""
+    reply_markup = buildMainMenu()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    schedule(context, update.effective_message.chat_id)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Alright")
+    await update.message.reply_text("Please choose:", reply_markup=reply_markup)
 
-def load_messages(fpath):
-    with open(fpath, 'r') as f:
-        messages = json.load(f)
-        f.close()
 
-    return messages
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Parses the CallbackQuery and updates the message text."""
+    query = update.callback_query
 
-if __name__ == '__main__':
+    # CallbackQueries need to be answered, even if no notification to the user is needed
+    # Some clients may have trouble otherwise. See https://core.telegram.org/bots/api#callbackquery
+    await query.answer()
+
+    global selectedState
+    global selectedLanguage
+
+    if query.data in languages:
+        selectedState = FunctionState.SelectLanguage    
+    else:
+        selectedState = FunctionState[query.data]
+
+    if selectedState == FunctionState.Translate:
+        keyboard = []
+        for lang in languages:
+            keyboard.append(
+                [InlineKeyboardButton(lang, callback_data=lang)]
+            )
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text("Please choose:", reply_markup=reply_markup)
+
+    elif selectedState == FunctionState.SelectLanguage:
+        selectedLanguage = query.data
+        await query.edit_message_text(text=f"Selected option: {query.data}")
+    elif selectedState == FunctionState.Chat:
+        await query.edit_message_text(text=f"Selected option: {query.data}")
+    else:
+        await query.edit_message_text(text=f"Selected option: {query.data}")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays info on how to use the bot."""
+    await update.message.reply_text("Use /start to test this bot.")
+
+async def translate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.message.voice:
+        fpath = await get_voice(update, context)
+        message_text = transcribe_russian(fpath)
+    else:
+        message_text = update.message.text
+
+    translated_text = deepl_translate(message_text, selectedLanguage)
+    reply_markup = buildMainMenu()
+
+    ogg_path = text_to_speech_gtts(translated_text, selectedLanguage)
+    await update.message.reply_voice(voice=open(ogg_path, 'rb'))
+    os.remove(ogg_path)
+
+    await update.message.reply_text(translated_text)
+    await update.message.reply_text('Please choose:', reply_markup=reply_markup)
+
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_text = chat_get_message(update.message.text)
+    reply_markup = buildMainMenu()
+    await update.message.reply_text(chat_text, reply_markup=reply_markup)
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if selectedState == FunctionState.SelectLanguage:
+        await translate_handler(update, context)
+    elif selectedState == FunctionState.Chat:
+        await chat_handler(update, context)
+
+DOWNLOAD_DIR = "./downloads"
+
+async def get_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+     # Create downloads directory if not exists
+    if not os.path.exists(DOWNLOAD_DIR):
+        os.makedirs(DOWNLOAD_DIR)
+
+    # Get the voice message
+    voice = update.message.voice
+    if not voice:
+        return None
+
+    # Download the voice message
+    file = await voice.get_file()
+    ogg_path = os.path.join(DOWNLOAD_DIR, f"{file.file_id}.ogg")
+    await file.download_to_drive(ogg_path)
+    await update.message.reply_text(f"Voice message saved as {ogg_path}")
+
+    return ogg_path
+
+if __name__ == "__main__":
     args = argparse.ArgumentParser()
-    args.add_argument('--token', type=str, required=True)
-    args.add_argument('--msg', type=str, required=False, default='messages.json')
+    args.add_argument('--tokens', type=str, required=False)
 
     args = args.parse_args()
-    token = args.token
+    tokens = args.tokens
 
-    msg_fpath = args.msg
+    if args.tokens:
+        tokens = args.tokens
+    else:
+        tokens = os.environ.get('TOKENS')
+ 
+    with open(tokens, 'r') as f:
+        tokens = json.load(f)
+        f.close()
 
-    application = ApplicationBuilder().token(token).build()
-    
-    start_handler = CommandHandler('start', start)
-    application.add_handler(start_handler)
-    
-    application.run_polling()
+    deepl_set_auth(tokens['deepl'])
+
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(tokens['telegram']).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler((filters.VOICE | filters.TEXT) & ~filters.COMMAND, message_handler))
+
+    # Run the bot until the user presses Ctrl-C
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
